@@ -1,0 +1,7 @@
+target/
+solana-release/
+node_modules/
+*.so
+admin-wallet-keypair.json
+target/deploy/*-keypair.json
+*.json
