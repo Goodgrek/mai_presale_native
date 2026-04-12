@@ -208,6 +208,7 @@ pub fn process_instruction(
 	    38 => allocate_marketing_bonus(accounts, &instruction_data[1..], program_id),
 	    39 => claim_marketing_instant(accounts, program_id),
 	    40 => claim_presale_airdrop(accounts, program_id),
+	    41 => close_stage(accounts, program_id),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -2968,6 +2969,53 @@ fn resume_all_claims(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramRe
     presale_data[228] = 0; // claims_paused = false
 
     msg!("ALL CLAIMS RESUMED by admin: {}", admin_account.key);
+    Ok(())
+}
+
+// ==================== INSTRUCTION 41: CLOSE STAGE ====================
+fn close_stage(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let admin_account = next_account_info(account_info_iter)?;
+    let presale_config_account = next_account_info(account_info_iter)?;
+
+    if !admin_account.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    validate_admin_access(presale_config_account, admin_account.key)?;
+
+    let mut presale_data = presale_config_account.data.borrow_mut();
+
+    if presale_data[73] != 1 {
+        msg!("ERROR: Presale is not active");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let current_stage = presale_data[64];
+
+    if current_stage > 14 {
+        msg!("ERROR: Invalid stage {}", current_stage);
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    let total_sold = u64::from_le_bytes(
+        presale_data[65..73].try_into()
+            .map_err(|_| ProgramError::InvalidAccountData)?
+    );
+
+    if current_stage == 14 {
+        presale_data[73] = 0;
+        drop(presale_data);
+        msg!("Presale CLOSED by admin on stage 14");
+        emit_presale_completion_event(total_sold);
+    } else {
+        let next_stage = current_stage + 1;
+        presale_data[64] = next_stage;
+        drop(presale_data);
+        msg!("Stage {} CLOSED by admin. Moving to stage {}", current_stage, next_stage);
+        emit_stage_transition_event(current_stage, next_stage, total_sold);
+    }
+
     Ok(())
 }
 
