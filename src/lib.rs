@@ -4775,7 +4775,7 @@ fn claim_marketing_instant(accounts: &[AccountInfo], program_id: &Pubkey) -> Pro
     // Check that listing is triggered
     {
         let config_data = presale_config_account.data.borrow();
-        let listing_triggered = config_data[42];
+        let listing_triggered = config_data[82];
         if listing_triggered == 0 {
             msg!("ERROR: Listing not triggered yet. Cannot claim marketing instant tokens.");
             return Err(ProgramError::Custom(46)); // Custom error: listing not triggered
@@ -4903,7 +4903,7 @@ fn claim_presale_airdrop(accounts: &[AccountInfo], program_id: &Pubkey) -> Progr
     // Read listing_date from config
     let listing_date = {
         let config_data = presale_config_account.data.borrow();
-        let listing_triggered = config_data[42];
+        let listing_triggered = config_data[82];
 
         if listing_triggered == 0 {
             msg!("ERROR: Listing not triggered yet. Cannot claim presale airdrop tokens.");
