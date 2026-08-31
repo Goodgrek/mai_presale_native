@@ -208,6 +208,7 @@ pub fn process_instruction(
 	    38 => allocate_marketing_bonus(accounts, &instruction_data[1..], program_id),
 	    39 => claim_marketing_instant(accounts, program_id),
 	    40 => claim_presale_airdrop(accounts, program_id),
+        41 => revoke_freeze_authority(accounts, program_id),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -1950,26 +1951,6 @@ fn mint_team_tokens(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramRes
         &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
     )?;
 
-    // Freeze ATA until vesting starts
-    let freeze_instruction = spl_token::instruction::freeze_account(
-        token_program_account.key,
-        team_vault_ata_account.key,
-        mai_mint_account.key,
-        presale_config_account.key,
-        &[],
-    )?;
-
-    invoke_signed(
-        &freeze_instruction,
-        &[
-            team_vault_ata_account.clone(),
-            mai_mint_account.clone(),
-            presale_config_account.clone(),
-            token_program_account.clone(),
-        ],
-        &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
-    )?;
-
     // Create team vesting record
     create_team_vesting_record(
         team_vesting_account,
@@ -2369,24 +2350,6 @@ if tge_claimed == 0 && tge_percent > 0 {
         return Err(ProgramError::InsufficientFunds);
     }
 
-    let thaw_instruction = spl_token::instruction::thaw_account(
-        token_program_account.key,
-        team_mai_account.key,
-        mai_mint_account.key,
-        presale_config_account.key,
-        &[],
-    )?;
-    let vesting_tokens = total_tokens - (total_tokens * tge_percent as u64 / 100);
-    invoke_signed(
-        &thaw_instruction,
-        &[
-            team_mai_account.clone(),
-            mai_mint_account.clone(),
-            presale_config_account.clone(),
-            token_program_account.clone(),
-        ],
-        &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
-    )?;
 
     // Transfer tokens from Team Vault
     let (team_vault_pda, team_vault_bump) = Pubkey::find_program_address(
@@ -2423,27 +2386,6 @@ invoke_signed(
         vesting_data[45 + i] = byte;
     });
 
-    let remaining = total_tokens - new_claimed;
-    if remaining > 0 {
-        let freeze_instruction = spl_token::instruction::freeze_account(
-            token_program_account.key,
-            team_mai_account.key,
-            mai_mint_account.key,
-            presale_config_account.key,
-            &[],
-        )?;
-
-        invoke_signed(
-            &freeze_instruction,
-            &[
-                team_mai_account.clone(),
-                mai_mint_account.clone(),
-                presale_config_account.clone(),
-                token_program_account.clone(),
-            ],
-            &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
-        )?;
-    }
 
     drop(vesting_data);
 
@@ -5005,6 +4947,76 @@ fn claim_presale_airdrop(accounts: &[AccountInfo], program_id: &Pubkey) -> Progr
         unlocked_amount,
         new_claimed
     );
+
+    Ok(())
+}
+
+
+// ==================== REVOKE FREEZE AUTHORITY ====================
+fn revoke_freeze_authority(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let admin_account = next_account_info(account_info_iter)?;
+    let presale_config_account = next_account_info(account_info_iter)?;
+    let team_vault_ata_account = next_account_info(account_info_iter)?;
+    let mai_mint_account = next_account_info(account_info_iter)?;
+    let token_program_account = next_account_info(account_info_iter)?;
+
+    validate_token_program(token_program_account)?;
+
+    if !admin_account.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    validate_admin_access(presale_config_account, admin_account.key)?;
+    validate_mai_mint_pda(mai_mint_account, program_id)?;
+
+    let presale_config_bump = {
+        let config_data = presale_config_account.data.borrow();
+        config_data[230]
+    };
+
+    // Thaw team vault ATA (frozen since mint_team_tokens)
+    let thaw_ix = spl_token::instruction::thaw_account(
+        token_program_account.key,
+        team_vault_ata_account.key,
+        mai_mint_account.key,
+        presale_config_account.key,
+        &[],
+    )?;
+
+    invoke_signed(
+        &thaw_ix,
+        &[
+            team_vault_ata_account.clone(),
+            mai_mint_account.clone(),
+            presale_config_account.clone(),
+            token_program_account.clone(),
+        ],
+        &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
+    )?;
+
+    // Revoke freeze authority on MAI mint permanently
+    let revoke_ix = spl_token::instruction::set_authority(
+        token_program_account.key,
+        mai_mint_account.key,
+        None,
+        spl_token::instruction::AuthorityType::FreezeAccount,
+        presale_config_account.key,
+        &[],
+    )?;
+
+    invoke_signed(
+        &revoke_ix,
+        &[
+            mai_mint_account.clone(),
+            presale_config_account.clone(),
+            token_program_account.clone(),
+        ],
+        &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
+    )?;
+
+    msg!("Team vault ATA thawed");
+    msg!("Freeze authority revoked from MAI mint");
 
     Ok(())
 }
