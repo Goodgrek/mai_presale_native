@@ -92,7 +92,7 @@ const BRONZE_METADATA_URI: &str = "https://gateway.pinata.cloud/ipfs/bafkreicuyf
 const SILVER_METADATA_URI: &str = "https://gateway.pinata.cloud/ipfs/bafkreihwjgvlcyfnkdqyirmg64yc4loyywp7sdxuyqee6gl4gk7pcv2wzq";
 const GOLD_METADATA_URI: &str = "https://gateway.pinata.cloud/ipfs/bafkreighfrap6x4wl23ycrf4gwcdkrooz3bod72nr6eeqmnxnfyegfrncu";
 const PLATINUM_METADATA_URI: &str = "https://gateway.pinata.cloud/ipfs/bafkreig42pu7r2hmmbfqgjbxbodjat4grdde7lotj4yr4vxnydstac7cba";
-const AIRDROP_SILVER_METADATA_URI: &str = "https://gateway.pinata.cloud/ipfs/bafkreifomnfp4ilvbnvokyuedv6c2b2vo5fueouehtaqvfdrgairx63j2u";
+const AIRDROP_SILVER_METADATA_URI: &str = "https://gateway.pinata.cloud/ipfs/bafkreig4ytbimcn4ibiovlvfryho7sxeye2bx353o7kkrhtuth22lrmvbi";
 
 // ==================== NFT COLLECTION METADATA ====================
 const COLLECTION_NAME: &str = "MAI Warriors";
@@ -177,7 +177,6 @@ pub fn process_instruction(
     let instruction_type = instruction_data[0];
 
     match instruction_type {
-        0 => initialize_presale(accounts, program_id),
         1 => buy_with_sol(accounts, &instruction_data[1..], program_id),
         2 => buy_with_usdc(accounts, &instruction_data[1..], program_id),
         3 => buy_with_usdt(accounts, &instruction_data[1..], program_id),
@@ -189,15 +188,11 @@ pub fn process_instruction(
         16 => mint_marketing_tokens(accounts, program_id),
         17 => mint_liquidity_tokens(accounts, program_id),
         18 => claim_team_tokens(accounts, program_id),
-        20 => create_mai_token(accounts, program_id),
-        21 => create_usdc_treasury(accounts, program_id),
-        22 => create_usdt_treasury(accounts, program_id),
         24 => withdraw_usdc(accounts, &instruction_data[1..], program_id),
         25 => withdraw_usdt(accounts, &instruction_data[1..], program_id),
 	    27 => withdraw_marketing_tokens(accounts, &instruction_data[1..], program_id),
         28 => withdraw_liquidity_tokens(accounts, &instruction_data[1..], program_id),
 	    29 => update_sol_price(accounts, &instruction_data[1..], program_id),
-	    30 => create_nft_collection(accounts, program_id),
         31 => mint_user_nft(accounts, &instruction_data[1..], program_id),
         32 => upgrade_user_nft(accounts, &instruction_data[1..], program_id),
         33 => claim_user_nft(accounts, program_id),
@@ -208,7 +203,8 @@ pub fn process_instruction(
 	    38 => allocate_marketing_bonus(accounts, &instruction_data[1..], program_id),
 	    39 => claim_marketing_instant(accounts, program_id),
 	    40 => claim_presale_airdrop(accounts, program_id),
-        41 => revoke_freeze_authority(accounts, program_id),
+        42 => verify_nft_collection(accounts, program_id),
+        43 => update_nft_metadata(accounts, &instruction_data[1..], program_id),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -224,14 +220,6 @@ fn emit_purchase_event(
     msg!("EVENT:PURCHASE:{}:{}:{}:{}:{}", buyer, amount, token_type, stage, tokens_received);
 }
 
-fn emit_claim_event(
-    claimer: &Pubkey,
-    amount: u64,
-    remaining_locked: u64,
-) {
-    msg!("EVENT:CLAIM:{}:{}:{}", claimer, amount, remaining_locked);
-}
-
 fn emit_stage_transition_event(
     from_stage: u8,
     to_stage: u8,
@@ -245,285 +233,6 @@ fn emit_presale_completion_event(total_sold: u64) {
 }
 
 // ==================== CREATE MAI TOKEN ====================
-fn create_mai_token(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    let admin_account = next_account_info(account_info_iter)?;
-    let mai_mint_account = next_account_info(account_info_iter)?;
-    let presale_config_account = next_account_info(account_info_iter)?;
-    let mai_metadata_account = next_account_info(account_info_iter)?;
-    let token_program_account = next_account_info(account_info_iter)?;
-    let token_metadata_program_account = next_account_info(account_info_iter)?;
-    let system_program_account = next_account_info(account_info_iter)?;
-    let rent_sysvar_account = next_account_info(account_info_iter)?;
-    let presale_vault_account = next_account_info(account_info_iter)?;
-    let associated_token_program_account = next_account_info(account_info_iter)?;
-
-    if !admin_account.is_signer {
-        return Err(ProgramError::MissingRequiredSignature);
-    }
-
-    validate_admin_access(presale_config_account, admin_account.key)?;
-
-    // Check that MAI token doesn't exist yet
-    if mai_mint_account.data_len() > 0 {
-        msg!("ERROR: MAI token already exists!");
-        return Err(ProgramError::AccountAlreadyInitialized);
-    }
-
-    let (mai_mint_pda, mai_mint_bump) = Pubkey::find_program_address(
-        &[MAI_MINT_SEED],
-        program_id,
-    );
-
-    if mai_mint_pda != *mai_mint_account.key {
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    let (presale_config_pda, presale_config_bump) = Pubkey::find_program_address(
-        &[PRESALE_CONFIG_SEED],
-        program_id,
-    );
-
-    if presale_config_pda != *presale_config_account.key {
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    let rent = Rent::from_account_info(rent_sysvar_account)?;
-    let mint_account_size = 82;
-    let mint_rent = rent.minimum_balance(mint_account_size);
-
-    invoke_signed(
-        &system_instruction::create_account(
-            admin_account.key,
-            mai_mint_account.key,
-            mint_rent,
-            mint_account_size as u64,
-            token_program_account.key,
-        ),
-        &[
-            admin_account.clone(),
-            mai_mint_account.clone(),
-            system_program_account.clone(),
-        ],
-        &[&[MAI_MINT_SEED, &[mai_mint_bump]]],
-    )?;
-
-    let init_mint_instruction = spl_token::instruction::initialize_mint(
-        token_program_account.key,
-        mai_mint_account.key,
-        &presale_config_pda,
-        Some(&presale_config_pda),
-        9,
-    )?;
-
-    invoke(
-        &init_mint_instruction,
-        &[
-            mai_mint_account.clone(),
-            rent_sysvar_account.clone(),
-            token_program_account.clone(),
-        ],
-    )?;
-
-    // ==================== CREATE METADATA ====================
-    let metadata_data = DataV2 {
-        name: MAI_TOKEN_NAME.to_string(),
-        symbol: MAI_TOKEN_SYMBOL.to_string(),
-        uri: MAI_TOKEN_URI.to_string(),
-        seller_fee_basis_points: 0,
-        creators: None,
-        collection: None,
-        uses: None,
-    };
-
-    let create_metadata_instruction = CreateMetadataAccountV3 {
-        metadata: *mai_metadata_account.key,
-        mint: *mai_mint_account.key,
-        mint_authority: *presale_config_account.key,
-        payer: *admin_account.key,
-        update_authority: (*presale_config_account.key, true),
-        system_program: *system_program_account.key,
-        rent: Some(*rent_sysvar_account.key),
-    };
-
-    let create_metadata_ix = create_metadata_instruction.instruction(CreateMetadataAccountV3InstructionArgs {
-        data: metadata_data,
-        is_mutable: true,
-        collection_details: None,
-    });
-
-    invoke_signed(
-        &create_metadata_ix,
-        &[
-            mai_metadata_account.clone(),
-            mai_mint_account.clone(),
-            presale_config_account.clone(),
-            admin_account.clone(),
-            system_program_account.clone(),
-            rent_sysvar_account.clone(),
-            token_metadata_program_account.clone(),
-        ],
-        &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
-    )?;
-
-    let mut presale_data = presale_config_account.data.borrow_mut();
-    mai_mint_pda.to_bytes().iter().enumerate().for_each(|(i, &byte)| {
-        presale_data[32 + i] = byte;
-    });
-    drop(presale_data);
-
-    // ==================== CREATE PRESALE VAULT ====================
-    let expected_presale_vault = get_associated_token_address(&presale_config_pda, &mai_mint_pda);
-    
-    if expected_presale_vault != *presale_vault_account.key {
-        msg!("Invalid presale vault address. Expected: {}, got: {}", expected_presale_vault, presale_vault_account.key);
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    if presale_vault_account.data_len() == 0 {
-        let create_presale_vault_instruction = create_associated_token_account(
-            admin_account.key,
-            &presale_config_pda,
-            &mai_mint_pda,
-            token_program_account.key,
-        );
-
-        invoke(
-            &create_presale_vault_instruction,
-            &[
-                admin_account.clone(),
-                presale_vault_account.clone(),
-                presale_config_account.clone(),
-                mai_mint_account.clone(),
-                system_program_account.clone(),
-                token_program_account.clone(),
-                associated_token_program_account.clone(),
-            ],
-        )?;
-
-    } else {
-        msg!("Presale vault already exists: {}", presale_vault_account.key);
-    }
-
-    Ok(())
-
-}
-
-// ==================== INITIALIZE PRESALE ====================
-fn initialize_presale(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    let admin_account = next_account_info(account_info_iter)?;
-    let presale_config_account = next_account_info(account_info_iter)?;
-    let system_program_account = next_account_info(account_info_iter)?;
-    let rent_sysvar_account = next_account_info(account_info_iter)?;
-
-    if !admin_account.is_signer {
-        return Err(ProgramError::MissingRequiredSignature);
-    }
-
-    let (presale_config_pda, presale_config_bump) = Pubkey::find_program_address(
-        &[PRESALE_CONFIG_SEED],
-        program_id,
-    );
-
-    if presale_config_pda != *presale_config_account.key {
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    let rent = Rent::from_account_info(rent_sysvar_account)?;
-    let account_size = 360;
-    let account_rent = rent.minimum_balance(account_size);
-
-    invoke_signed(
-        &system_instruction::create_account(
-            admin_account.key,
-            presale_config_account.key,
-            account_rent,
-            account_size as u64,
-            program_id,
-        ),
-        &[
-            admin_account.clone(),
-            presale_config_account.clone(),
-            system_program_account.clone(),
-        ],
-        &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
-    )?;
-
-    let mut account_data = presale_config_account.data.borrow_mut();
-
-    // Initialize admin
-    admin_account.key.to_bytes().iter().enumerate().for_each(|(i, &byte)| {
-        account_data[i] = byte;
-    });
-
-    // MAI mint will be set later via create_mai_token
-    [0u8; 32].iter().enumerate().for_each(|(i, &byte)| {
-        account_data[32 + i] = byte;
-    });
-
-    account_data[64] = 1; // current_stage = 1
-    0u64.to_le_bytes().iter().enumerate().for_each(|(i, &byte)| {
-        account_data[65 + i] = byte; // total_sold = 0
-    });
-    account_data[73] = 1; // is_active = true
-    0i64.to_le_bytes().iter().enumerate().for_each(|(i, &byte)| {
-        account_data[74 + i] = byte; // listing_date = 0
-    });
-    account_data[82] = 0; // listing_triggered = false
-
-    // SOL price in CENTS - $180.00 = 18000 cents
-    18000u64.to_le_bytes().iter().enumerate().for_each(|(i, &byte)| {
-        account_data[83 + i] = byte; // sol_price = $180.00 in cents
-    });
-
-    // Initialize collected amounts
-    0u64.to_le_bytes().iter().enumerate().for_each(|(i, &byte)| {
-        account_data[91 + i] = byte;  // usdc_collected = 0
-        account_data[99 + i] = byte;  // usdt_collected = 0
-        account_data[107 + i] = byte; // sol_collected = 0
-    });
-
-    // Initialize stage_sold_amounts array (14 stages x 8 bytes each)
-    for i in 0..14 {
-        0u64.to_le_bytes().iter().enumerate().for_each(|(j, &byte)| {
-            account_data[115 + i * 8 + j] = byte;
-        });
-    }
-
-    // State flags
-    account_data[227] = 0; // is_paused = false
-    account_data[228] = 0; // emergency_mode = false
-    account_data[229] = 0; // reentrancy_guard = false
-    account_data[230] = presale_config_bump;
-    account_data[231] = 0; // team_tokens_minted = false
-    account_data[232] = 0; // marketing_tokens_minted = false
-    account_data[233] = 0; // liquidity_tokens_minted = false
-    account_data[234] = 0; // mint_authority_revoked = false
-    account_data[235] = 0; // usdc_treasury_created = false
-    account_data[236] = 0; // usdt_treasury_created = false  
-    account_data[237] = 0; // nft_collection_created = false
-    // NFT counters (u16 = 2 bytes each)
-    0u16.to_le_bytes().iter().enumerate().for_each(|(i, &byte)| {
-    account_data[238 + i] = byte; // bronze_count = 0
-    });
-    0u16.to_le_bytes().iter().enumerate().for_each(|(i, &byte)| {
-    account_data[240 + i] = byte; // silver_count = 0
-    });
-    0u16.to_le_bytes().iter().enumerate().for_each(|(i, &byte)| {
-    account_data[242 + i] = byte; // gold_count = 0
-    });
-    0u16.to_le_bytes().iter().enumerate().for_each(|(i, &byte)| {
-    account_data[244 + i] = byte; // platinum_count = 0
-    });
-    for i in 246..360 {
-    account_data[i] = 0;
-}
-
-    Ok(())
-}
-
-// ==================== PURCHASE FUNCTIONS ====================
 fn buy_with_sol(accounts: &[AccountInfo], data: &[u8], program_id: &Pubkey) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
     let buyer_account = next_account_info(account_info_iter)?;
@@ -1062,55 +771,6 @@ let total_tokens = mint_to_presale_vault_simple(
 }
 
 // ==================== MINT TO PRESALE VAULT ====================
-fn mint_to_presale_vault<'a>(
-    presale_vault_account: &AccountInfo<'a>,
-    mai_mint_account: &AccountInfo<'a>,
-    presale_config_account: &AccountInfo<'a>,
-    token_program_account: &AccountInfo<'a>,
-    purchase_results: &[StagePurchaseResult],
-    presale_config_bump: u8,
-) -> Result<u64, ProgramError> {
-
-if presale_vault_account.data_len() == 0 {
-        msg!("ERROR: Presale vault doesn't exist! Call create_mai_token first.");
-        return Err(ProgramError::UninitializedAccount);
-    }
-
-    let mut total_tokens = 0u64;
-
-    for result in purchase_results {
-        if result.tokens == 0 {
-            break;
-        }
-
-        let mint_instruction = spl_token::instruction::mint_to(
-            token_program_account.key,
-            mai_mint_account.key,
-            presale_vault_account.key,
-            presale_config_account.key,
-            &[],
-            result.tokens,
-        )?;
-
-        invoke_signed(
-            &mint_instruction,
-            &[
-                mai_mint_account.clone(),
-                presale_vault_account.clone(),
-                presale_config_account.clone(),
-                token_program_account.clone(),
-            ],
-            &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
-        )?;
-
-        total_tokens = total_tokens
-            .checked_add(result.tokens)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
-    }
-
-	    Ok(total_tokens)
-}
-
 fn mint_to_presale_vault_simple<'a>(
     presale_vault_account: &AccountInfo<'a>,
     mai_mint_account: &AccountInfo<'a>,
@@ -2398,174 +2058,6 @@ invoke_signed(
 }
 
 // ==================== TREASURY FUNCTIONS ====================
-fn create_usdc_treasury(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    let admin_account = next_account_info(account_info_iter)?;
-    let presale_config_account = next_account_info(account_info_iter)?;
-    let usdc_treasury_pda_account = next_account_info(account_info_iter)?;
-    let usdc_treasury_ata_account = next_account_info(account_info_iter)?;
-    let usdc_mint_account = next_account_info(account_info_iter)?;
-    let token_program_account = next_account_info(account_info_iter)?;
-    let system_program_account = next_account_info(account_info_iter)?;
-    let associated_token_program_account = next_account_info(account_info_iter)?;
-
-    if !admin_account.is_signer {
-        return Err(ProgramError::MissingRequiredSignature);
-    }
-
-    validate_admin_access(presale_config_account, admin_account.key)?;
-
-    // Check if already created
-    let presale_data = presale_config_account.data.borrow();
-    if presale_data[235] == 1 {
-    msg!("ERROR: USDC Treasury already created!");
-    return Err(ProgramError::AccountAlreadyInitialized);
-    }
-    drop(presale_data);
-
-    if *usdc_mint_account.key != USDC_MINT_DEVNET {
-        msg!("Invalid USDC mint. Expected: {}", USDC_MINT_DEVNET);
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    let (usdc_treasury_pda, _) = Pubkey::find_program_address(
-        &[USDC_TREASURY_SEED],
-        program_id,
-    );
-
-    if usdc_treasury_pda != *usdc_treasury_pda_account.key {
-        msg!("Invalid USDC Treasury PDA. Expected: {}, got: {}", usdc_treasury_pda, usdc_treasury_pda_account.key);
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    let usdc_treasury_ata = get_associated_token_address(&usdc_treasury_pda, usdc_mint_account.key);
-
-    if usdc_treasury_ata != *usdc_treasury_ata_account.key {
-        msg!("Invalid USDC Treasury ATA. Expected: {}, got: {}", usdc_treasury_ata, usdc_treasury_ata_account.key);
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    if usdc_treasury_ata_account.data_len() == 0 {
-        let create_ata_instruction = create_associated_token_account(
-            admin_account.key,
-            &usdc_treasury_pda,
-            usdc_mint_account.key,
-            token_program_account.key,
-        );
-
-        invoke(
-            &create_ata_instruction,
-            &[
-                admin_account.clone(),
-                usdc_treasury_ata_account.clone(),
-                usdc_treasury_pda_account.clone(),
-                usdc_mint_account.clone(),
-                system_program_account.clone(),
-                token_program_account.clone(),
-                associated_token_program_account.clone(),
-            ],
-        )?;
-
-        msg!("USDC Treasury ATA created: {}", usdc_treasury_ata_account.key);
-        msg!("USDC Treasury PDA (Owner): {}", usdc_treasury_pda);
-    } else {
-        msg!("USDC Treasury ATA already exists: {}", usdc_treasury_ata_account.key);
-    }
-
-    // Mark as created
-    let mut presale_data = presale_config_account.data.borrow_mut();
-    presale_data[235] = 1; // usdc_treasury_created = true
-    drop(presale_data);
-
-    msg!("USDC Treasury marked as created");
-
-    Ok(())
-}
-
-fn create_usdt_treasury(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    let admin_account = next_account_info(account_info_iter)?;
-    let presale_config_account = next_account_info(account_info_iter)?;
-    let usdt_treasury_pda_account = next_account_info(account_info_iter)?;
-    let usdt_treasury_ata_account = next_account_info(account_info_iter)?;
-    let usdt_mint_account = next_account_info(account_info_iter)?;
-    let token_program_account = next_account_info(account_info_iter)?;
-    let system_program_account = next_account_info(account_info_iter)?;
-    let associated_token_program_account = next_account_info(account_info_iter)?;
-
-    if !admin_account.is_signer {
-        return Err(ProgramError::MissingRequiredSignature);
-    }
-
-    validate_admin_access(presale_config_account, admin_account.key)?;
-
-    // Check if already created
-    let presale_data = presale_config_account.data.borrow();
-    if presale_data[236] == 1 {
-    msg!("ERROR: USDT Treasury already created!");
-    return Err(ProgramError::AccountAlreadyInitialized);
-    }
-    drop(presale_data);
-
-    if *usdt_mint_account.key != USDT_MINT_DEVNET {
-        msg!("Invalid USDT mint. Expected: {}", USDT_MINT_DEVNET);
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    let (usdt_treasury_pda, _) = Pubkey::find_program_address(
-        &[USDT_TREASURY_SEED],
-        program_id,
-    );
-
-    if usdt_treasury_pda != *usdt_treasury_pda_account.key {
-        msg!("Invalid USDT Treasury PDA. Expected: {}, got: {}", usdt_treasury_pda, usdt_treasury_pda_account.key);
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    let usdt_treasury_ata = get_associated_token_address(&usdt_treasury_pda, usdt_mint_account.key);
-
-    if usdt_treasury_ata != *usdt_treasury_ata_account.key {
-        msg!("Invalid USDT Treasury ATA. Expected: {}, got: {}", usdt_treasury_ata, usdt_treasury_ata_account.key);
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    if usdt_treasury_ata_account.data_len() == 0 {
-        let create_ata_instruction = create_associated_token_account(
-            admin_account.key,
-            &usdt_treasury_pda,
-            usdt_mint_account.key,
-            token_program_account.key,
-        );
-
-        invoke(
-            &create_ata_instruction,
-            &[
-                admin_account.clone(),
-                usdt_treasury_ata_account.clone(),
-                usdt_treasury_pda_account.clone(),
-                usdt_mint_account.clone(),
-                system_program_account.clone(),
-                token_program_account.clone(),
-                associated_token_program_account.clone(),
-            ],
-        )?;
-
-        msg!("USDT Treasury ATA created: {}", usdt_treasury_ata_account.key);
-        msg!("USDT Treasury PDA (Owner): {}", usdt_treasury_pda);
-    } else {
-        msg!("USDT Treasury ATA already exists: {}", usdt_treasury_ata_account.key);
-    }
-
-    // Mark as created
-    let mut presale_data = presale_config_account.data.borrow_mut();
-    presale_data[236] = 1; // usdt_treasury_created = true
-    drop(presale_data);
-
-    msg!("USDT Treasury marked as created");
-
-    Ok(())
-}
-	
 fn withdraw_usdc(accounts: &[AccountInfo], data: &[u8], program_id: &Pubkey) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
     let admin_account = next_account_info(account_info_iter)?;
@@ -3257,338 +2749,6 @@ fn validate_token_program(token_program: &AccountInfo) -> ProgramResult {
 }
 
 // ==================== NFT FUNCTIONS ====================
-fn create_nft_collection(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    let admin_account = next_account_info(account_info_iter)?;
-    let presale_config_account = next_account_info(account_info_iter)?;
-    let collection_mint_account = next_account_info(account_info_iter)?;
-    let collection_metadata_account = next_account_info(account_info_iter)?;
-    let collection_master_edition_account = next_account_info(account_info_iter)?;
-    let collection_ata_account = next_account_info(account_info_iter)?;
-    let token_program_account = next_account_info(account_info_iter)?;
-    let token_metadata_program_account = next_account_info(account_info_iter)?;
-    let system_program_account = next_account_info(account_info_iter)?;
-    let rent_sysvar_account = next_account_info(account_info_iter)?;
-    let associated_token_program_account = next_account_info(account_info_iter)?;
-
-    if !admin_account.is_signer {
-        return Err(ProgramError::MissingRequiredSignature);
-    }
-
-    validate_admin_access(presale_config_account, admin_account.key)?;
-
-    // Split into small functions to save stack space
-    let (presale_config_bump, collection_mint_bump, presale_config_pda) = 
-        validate_collection_creation(presale_config_account, collection_mint_account, program_id)?;
-
-    validate_collection_pdas(
-        collection_metadata_account,
-        collection_master_edition_account,
-        collection_ata_account,
-        collection_mint_account,
-        token_metadata_program_account,
-        &presale_config_pda,
-    )?;
-
-    // Create in separate small functions
-    create_collection_mint(
-        admin_account,
-        collection_mint_account,
-        presale_config_account,
-        system_program_account,
-        rent_sysvar_account,
-        token_program_account,
-        collection_mint_bump,
-    )?;
-
-    create_collection_ata(
-        admin_account,
-        collection_ata_account,
-        presale_config_account,
-        collection_mint_account,
-        system_program_account,
-        token_program_account,
-        associated_token_program_account,
-        presale_config_bump,
-    )?;
-
-    create_collection_metadata(
-        collection_metadata_account,
-        collection_mint_account,
-        presale_config_account,
-        admin_account,
-        system_program_account,
-        rent_sysvar_account,
-        token_metadata_program_account,
-        presale_config_bump,
-    )?;
-
-    create_collection_master_edition(
-        collection_master_edition_account,
-        collection_mint_account,
-        presale_config_account,
-        admin_account,
-        collection_metadata_account,
-        token_program_account,
-        system_program_account,
-        rent_sysvar_account,
-        token_metadata_program_account,
-        presale_config_bump,
-    )?;
-
-    // Update collection created flag
-    {
-        let mut presale_data = presale_config_account.data.borrow_mut();
-        presale_data[NFT_COLLECTION_CREATED_INDEX] = 1;
-    }
-
-    msg!("COLLECTION CREATED: {}", collection_mint_account.key);
-    Ok(())
-}
-
-// Helper functions to save stack space
-
-fn validate_collection_creation<'a>(
-    presale_config_account: &AccountInfo<'a>,
-    collection_mint_account: &AccountInfo<'a>,
-    program_id: &Pubkey,
-) -> Result<(u8, u8, Pubkey), ProgramError> {
-    let presale_data = presale_config_account.data.borrow();
-    if presale_data[NFT_COLLECTION_CREATED_INDEX] == 1 {
-        return Err(ProgramError::AccountAlreadyInitialized);
-    }
-    let presale_bump = presale_data[230];
-    drop(presale_data);
-
-    let (collection_mint_pda, mint_bump) = Pubkey::find_program_address(&[NFT_COLLECTION_SEED], program_id);
-    if collection_mint_pda != *collection_mint_account.key {
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    let (presale_pda, _) = Pubkey::find_program_address(&[PRESALE_CONFIG_SEED], program_id);
-    Ok((presale_bump, mint_bump, presale_pda))
-}
-
-fn validate_collection_pdas<'a>(
-    collection_metadata_account: &AccountInfo<'a>,
-    collection_master_edition_account: &AccountInfo<'a>,
-    collection_ata_account: &AccountInfo<'a>,
-    collection_mint_account: &AccountInfo<'a>,
-    token_metadata_program_account: &AccountInfo<'a>,
-    presale_config_pda: &Pubkey,
-) -> ProgramResult {
-    // Metadata PDA
-    let metadata_seeds = &[b"metadata", token_metadata_program_account.key.as_ref(), collection_mint_account.key.as_ref()];
-    let (expected_metadata_pda, _) = Pubkey::find_program_address(metadata_seeds, token_metadata_program_account.key);
-    if expected_metadata_pda != *collection_metadata_account.key {
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    // Master Edition PDA
-    let master_edition_seeds = &[b"metadata", token_metadata_program_account.key.as_ref(), collection_mint_account.key.as_ref(), b"edition"];
-    let (expected_master_edition_pda, _) = Pubkey::find_program_address(master_edition_seeds, token_metadata_program_account.key);
-    if expected_master_edition_pda != *collection_master_edition_account.key {
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    // Collection ATA
-    let expected_collection_ata = get_associated_token_address(presale_config_pda, collection_mint_account.key);
-    if expected_collection_ata != *collection_ata_account.key {
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    Ok(())
-}
-
-fn create_collection_mint<'a>(
-    admin_account: &AccountInfo<'a>,
-    collection_mint_account: &AccountInfo<'a>,
-    presale_config_account: &AccountInfo<'a>,
-    system_program_account: &AccountInfo<'a>,
-    rent_sysvar_account: &AccountInfo<'a>,
-    token_program_account: &AccountInfo<'a>,
-    collection_mint_bump: u8,
-) -> ProgramResult {
-    invoke_signed(
-        &system_instruction::create_account(
-            admin_account.key,
-            collection_mint_account.key,
-            2_039_280,
-            82,
-            token_program_account.key,
-        ),
-        &[admin_account.clone(), collection_mint_account.clone(), system_program_account.clone()],
-        &[&[NFT_COLLECTION_SEED, &[collection_mint_bump]]],
-    )?;
-
-    invoke(
-        &spl_token::instruction::initialize_mint(
-            token_program_account.key,
-            collection_mint_account.key,
-            presale_config_account.key,
-            Some(presale_config_account.key),
-            0,
-        )?,
-        &[collection_mint_account.clone(), rent_sysvar_account.clone(), token_program_account.clone()],
-    )?;
-
-    Ok(())
-}
-
-fn create_collection_ata<'a>(
-    admin_account: &AccountInfo<'a>,
-    collection_ata_account: &AccountInfo<'a>,
-    presale_config_account: &AccountInfo<'a>,
-    collection_mint_account: &AccountInfo<'a>,
-    system_program_account: &AccountInfo<'a>,
-    token_program_account: &AccountInfo<'a>,
-    associated_token_program_account: &AccountInfo<'a>,
-    presale_config_bump: u8,
-) -> ProgramResult {
-    if collection_ata_account.data_len() == 0 {
-        invoke(
-            &create_associated_token_account(
-                admin_account.key,
-                presale_config_account.key,
-                collection_mint_account.key,
-                token_program_account.key,
-            ),
-            &[
-                admin_account.clone(),
-                collection_ata_account.clone(),
-                presale_config_account.clone(),
-                collection_mint_account.clone(),
-                system_program_account.clone(),
-                token_program_account.clone(),
-                associated_token_program_account.clone(),
-            ],
-        )?;
-    }
-
-    invoke_signed(
-        &spl_token::instruction::mint_to(
-            token_program_account.key,
-            collection_mint_account.key,
-            collection_ata_account.key,
-            presale_config_account.key,
-            &[],
-            1,
-        )?,
-        &[
-            collection_mint_account.clone(),
-            collection_ata_account.clone(),
-            presale_config_account.clone(),
-            token_program_account.clone(),
-        ],
-        &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
-    )?;
-
-    Ok(())
-}
-
-fn create_collection_metadata<'a>(
-    collection_metadata_account: &AccountInfo<'a>,
-    collection_mint_account: &AccountInfo<'a>,
-    presale_config_account: &AccountInfo<'a>,
-    admin_account: &AccountInfo<'a>,
-    system_program_account: &AccountInfo<'a>,
-    rent_sysvar_account: &AccountInfo<'a>,
-    token_metadata_program_account: &AccountInfo<'a>,
-    presale_config_bump: u8,
-) -> ProgramResult {
-    // Create structures locally in function
-    let metadata_data = DataV2 {
-        name: COLLECTION_NAME.to_string(),
-        symbol: COLLECTION_SYMBOL.to_string(),
-        uri: COLLECTION_URI.to_string(),
-        seller_fee_basis_points: 0,
-        creators: None,
-        collection: None,
-        uses: None,
-    };
-
-    let create_metadata_args = CreateMetadataAccountV3InstructionArgs {
-        data: metadata_data,
-        is_mutable: true,
-        collection_details: None,
-    };
-
-    let create_metadata_ix = CreateMetadataAccountV3 {
-        metadata: *collection_metadata_account.key,
-        mint: *collection_mint_account.key,
-        mint_authority: *presale_config_account.key,
-        payer: *admin_account.key,
-        update_authority: (*presale_config_account.key, true),
-        system_program: *system_program_account.key,
-        rent: Some(*rent_sysvar_account.key),
-    }.instruction(create_metadata_args);
-
-    invoke_signed(
-        &create_metadata_ix,
-        &[
-            collection_metadata_account.clone(),
-            collection_mint_account.clone(),
-            presale_config_account.clone(),
-            admin_account.clone(),
-            system_program_account.clone(),
-            rent_sysvar_account.clone(),
-            token_metadata_program_account.clone(),
-        ],
-        &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
-    )?;
-
-    Ok(())
-}
-
-fn create_collection_master_edition<'a>(
-    collection_master_edition_account: &AccountInfo<'a>,
-    collection_mint_account: &AccountInfo<'a>,
-    presale_config_account: &AccountInfo<'a>,
-    admin_account: &AccountInfo<'a>,
-    collection_metadata_account: &AccountInfo<'a>,
-    token_program_account: &AccountInfo<'a>,
-    system_program_account: &AccountInfo<'a>,
-    rent_sysvar_account: &AccountInfo<'a>,
-    token_metadata_program_account: &AccountInfo<'a>,
-    presale_config_bump: u8,
-) -> ProgramResult {
-    // Create structures locally
-    let master_edition_args = mpl_token_metadata::instructions::CreateMasterEditionV3InstructionArgs {
-        max_supply: Some(0),
-    };
-
-    let master_edition_ix = mpl_token_metadata::instructions::CreateMasterEditionV3 {
-        edition: *collection_master_edition_account.key,
-        mint: *collection_mint_account.key,
-        update_authority: *presale_config_account.key,
-        mint_authority: *presale_config_account.key,
-        payer: *admin_account.key,
-        metadata: *collection_metadata_account.key,
-        token_program: *token_program_account.key,
-        system_program: *system_program_account.key,
-        rent: Some(*rent_sysvar_account.key),
-    }.instruction(master_edition_args);
-
-    invoke_signed(
-        &master_edition_ix,
-        &[
-            collection_master_edition_account.clone(),
-            collection_mint_account.clone(),
-            presale_config_account.clone(),
-            presale_config_account.clone(),
-            admin_account.clone(),
-            collection_metadata_account.clone(),
-            token_program_account.clone(),
-            system_program_account.clone(),
-            rent_sysvar_account.clone(),
-            token_metadata_program_account.clone(),
-        ],
-        &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
-    )?;
-
-    Ok(())
-}
-
 fn mint_user_nft(accounts: &[AccountInfo], data: &[u8], program_id: &Pubkey) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
     let user_account = next_account_info(account_info_iter)?;
@@ -3841,8 +3001,8 @@ fn create_single_nft<'a>(
     let nft_master_edition_account = next_account_info(account_info_iter)?;
 
     let collection_mint_account = next_account_info(account_info_iter)?;
-    let _collection_metadata_account = next_account_info(account_info_iter)?;  // unused
-    let _collection_master_edition_account = next_account_info(account_info_iter)?;  // unused
+    let collection_metadata_account = next_account_info(account_info_iter)?;
+    let collection_master_edition_account = next_account_info(account_info_iter)?;
     let token_program_account = next_account_info(account_info_iter)?;
     let token_metadata_program_account = next_account_info(account_info_iter)?;
     let system_program_account = next_account_info(account_info_iter)?;
@@ -4006,6 +3166,31 @@ fn create_single_nft<'a>(
             token_program_account.clone(),
             system_program_account.clone(),
             rent_sysvar_account.clone(),
+            token_metadata_program_account.clone(),
+        ],
+        &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
+    )?;
+
+
+    // Подтверждаем принадлежность к коллекции MAI Warriors в той же транзакции,
+    // иначе кошельки и маркетплейсы считают NFT неопознанным
+    invoke_signed(
+        &mpl_token_metadata::instructions::VerifyCollection {
+            metadata: *nft_metadata_account.key,
+            collection_authority: *presale_config_account.key,
+            payer: *user_account.key,
+            collection_mint: *collection_mint_account.key,
+            collection: *collection_metadata_account.key,
+            collection_master_edition_account: *collection_master_edition_account.key,
+            collection_authority_record: None,
+        }.instruction(),
+        &[
+            nft_metadata_account.clone(),
+            presale_config_account.clone(),
+            user_account.clone(),
+            collection_mint_account.clone(),
+            collection_metadata_account.clone(),
+            collection_master_edition_account.clone(),
             token_metadata_program_account.clone(),
         ],
         &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
@@ -4275,8 +3460,8 @@ fn create_airdrop_nft<'a>(
     let airdrop_nft_master_edition_account = next_account_info(account_info_iter)?;
 
     let collection_mint_account = next_account_info(account_info_iter)?;
-    let _collection_metadata_account = next_account_info(account_info_iter)?;  // unused
-    let _collection_master_edition_account = next_account_info(account_info_iter)?;  // unused
+    let collection_metadata_account = next_account_info(account_info_iter)?;
+    let collection_master_edition_account = next_account_info(account_info_iter)?;
     let token_program_account = next_account_info(account_info_iter)?;
     let token_metadata_program_account = next_account_info(account_info_iter)?;
     let system_program_account = next_account_info(account_info_iter)?;
@@ -4318,8 +3503,8 @@ fn create_airdrop_nft<'a>(
 
     // Generate NFT name with counter
    let tier_count = get_airdrop_count(presale_config_account)?;
-   let nft_name = format!("MAI Airdrop Warrior #{}", tier_count); // "MAI Airdrop Warrior #1"
-   let nft_symbol = "AIRDROP".to_string();
+   let nft_name = format!("MAI Warrior #{}", tier_count);
+   let nft_symbol = "MAIW".to_string();
    let nft_uri = AIRDROP_SILVER_METADATA_URI.to_string();
 
     msg!("Creating airdrop NFT: {}", nft_name);
@@ -4469,6 +3654,31 @@ fn create_airdrop_nft<'a>(
             token_program_account.clone(),
             system_program_account.clone(),
             rent_sysvar_account.clone(),
+            token_metadata_program_account.clone(),
+        ],
+        &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
+    )?;
+
+
+    // Подтверждаем принадлежность к коллекции MAI Warriors в той же транзакции,
+    // иначе кошельки и маркетплейсы считают NFT неопознанным
+    invoke_signed(
+        &mpl_token_metadata::instructions::VerifyCollection {
+            metadata: *airdrop_nft_metadata_account.key,
+            collection_authority: *presale_config_account.key,
+            payer: *user_account.key,
+            collection_mint: *collection_mint_account.key,
+            collection: *collection_metadata_account.key,
+            collection_master_edition_account: *collection_master_edition_account.key,
+            collection_authority_record: None,
+        }.instruction(),
+        &[
+            airdrop_nft_metadata_account.clone(),
+            presale_config_account.clone(),
+            user_account.clone(),
+            collection_mint_account.clone(),
+            collection_metadata_account.clone(),
+            collection_master_edition_account.clone(),
             token_metadata_program_account.clone(),
         ],
         &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
@@ -4953,70 +4163,146 @@ fn claim_presale_airdrop(accounts: &[AccountInfo], program_id: &Pubkey) -> Progr
 
 
 // ==================== REVOKE FREEZE AUTHORITY ====================
-fn revoke_freeze_authority(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+fn verify_nft_collection(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
     let admin_account = next_account_info(account_info_iter)?;
     let presale_config_account = next_account_info(account_info_iter)?;
-    let team_vault_ata_account = next_account_info(account_info_iter)?;
-    let mai_mint_account = next_account_info(account_info_iter)?;
-    let token_program_account = next_account_info(account_info_iter)?;
-
-    validate_token_program(token_program_account)?;
+    let nft_metadata_account = next_account_info(account_info_iter)?;
+    let collection_mint_account = next_account_info(account_info_iter)?;
+    let collection_metadata_account = next_account_info(account_info_iter)?;
+    let collection_master_edition_account = next_account_info(account_info_iter)?;
+    let token_metadata_program_account = next_account_info(account_info_iter)?;
 
     if !admin_account.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
     validate_admin_access(presale_config_account, admin_account.key)?;
-    validate_mai_mint_pda(mai_mint_account, program_id)?;
+
+    // Collection mint must be this program's collection PDA
+    let (expected_collection_mint, _) = Pubkey::find_program_address(&[NFT_COLLECTION_SEED], program_id);
+    if expected_collection_mint != *collection_mint_account.key {
+        msg!("ERROR: Invalid collection mint");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Collection metadata PDA
+    let metadata_seeds = &[b"metadata", token_metadata_program_account.key.as_ref(), collection_mint_account.key.as_ref()];
+    let (expected_collection_metadata, _) = Pubkey::find_program_address(metadata_seeds, token_metadata_program_account.key);
+    if expected_collection_metadata != *collection_metadata_account.key {
+        msg!("ERROR: Invalid collection metadata");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Collection master edition PDA
+    let edition_seeds = &[b"metadata", token_metadata_program_account.key.as_ref(), collection_mint_account.key.as_ref(), b"edition"];
+    let (expected_collection_edition, _) = Pubkey::find_program_address(edition_seeds, token_metadata_program_account.key);
+    if expected_collection_edition != *collection_master_edition_account.key {
+        msg!("ERROR: Invalid collection master edition");
+        return Err(ProgramError::InvalidAccountData);
+    }
 
     let presale_config_bump = {
         let config_data = presale_config_account.data.borrow();
         config_data[230]
     };
 
-    // Thaw team vault ATA (frozen since mint_team_tokens)
-    let thaw_ix = spl_token::instruction::thaw_account(
-        token_program_account.key,
-        team_vault_ata_account.key,
-        mai_mint_account.key,
-        presale_config_account.key,
-        &[],
-    )?;
+    let verify_ix = mpl_token_metadata::instructions::VerifyCollection {
+        metadata: *nft_metadata_account.key,
+        collection_authority: *presale_config_account.key,
+        payer: *admin_account.key,
+        collection_mint: *collection_mint_account.key,
+        collection: *collection_metadata_account.key,
+        collection_master_edition_account: *collection_master_edition_account.key,
+        collection_authority_record: None,
+    }.instruction();
 
     invoke_signed(
-        &thaw_ix,
+        &verify_ix,
         &[
-            team_vault_ata_account.clone(),
-            mai_mint_account.clone(),
+            nft_metadata_account.clone(),
             presale_config_account.clone(),
-            token_program_account.clone(),
+            admin_account.clone(),
+            collection_mint_account.clone(),
+            collection_metadata_account.clone(),
+            collection_master_edition_account.clone(),
+            token_metadata_program_account.clone(),
         ],
         &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
     )?;
 
-    // Revoke freeze authority on MAI mint permanently
-    let revoke_ix = spl_token::instruction::set_authority(
-        token_program_account.key,
-        mai_mint_account.key,
-        None,
-        spl_token::instruction::AuthorityType::FreezeAccount,
-        presale_config_account.key,
-        &[],
-    )?;
+    msg!("NFT collection verified for metadata: {}", nft_metadata_account.key);
+
+    Ok(())
+}
+
+// ==================== UPDATE NFT METADATA ====================
+fn update_nft_metadata(accounts: &[AccountInfo], data: &[u8], program_id: &Pubkey) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let admin_account = next_account_info(account_info_iter)?;
+    let presale_config_account = next_account_info(account_info_iter)?;
+    let nft_metadata_account = next_account_info(account_info_iter)?;
+    let token_metadata_program_account = next_account_info(account_info_iter)?;
+
+    if !admin_account.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    validate_admin_access(presale_config_account, admin_account.key)?;
+
+    if data.len() < 2 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let number = u16::from_le_bytes([data[0], data[1]]);
+
+    let (collection_mint_pda, _) = Pubkey::find_program_address(&[NFT_COLLECTION_SEED], program_id);
+
+    let presale_config_bump = {
+        let config_data = presale_config_account.data.borrow();
+        config_data[230]
+    };
+
+    // коллекцию передаём как есть — Metaplex запрещает менять это поле у подтверждённой коллекции
+    let new_data = DataV2 {
+        name: format!("MAI Warrior #{}", number),
+        symbol: "MAIW".to_string(),
+        uri: AIRDROP_SILVER_METADATA_URI.to_string(),
+        seller_fee_basis_points: 500,
+        creators: Some(vec![
+            mpl_token_metadata::types::Creator {
+                address: *admin_account.key,
+                verified: false,
+                share: 100,
+            }
+        ]),
+        collection: Some(mpl_token_metadata::types::Collection {
+            verified: true,
+            key: collection_mint_pda,
+        }),
+        uses: None,
+    };
+
+    let update_ix = mpl_token_metadata::instructions::UpdateMetadataAccountV2 {
+        metadata: *nft_metadata_account.key,
+        update_authority: *presale_config_account.key,
+    }.instruction(mpl_token_metadata::instructions::UpdateMetadataAccountV2InstructionArgs {
+        data: Some(new_data),
+        new_update_authority: None,
+        primary_sale_happened: None,
+        is_mutable: None,
+    });
 
     invoke_signed(
-        &revoke_ix,
+        &update_ix,
         &[
-            mai_mint_account.clone(),
+            nft_metadata_account.clone(),
             presale_config_account.clone(),
-            token_program_account.clone(),
+            token_metadata_program_account.clone(),
         ],
         &[&[PRESALE_CONFIG_SEED, &[presale_config_bump]]],
     )?;
 
-    msg!("Team vault ATA thawed");
-    msg!("Freeze authority revoked from MAI mint");
+    msg!("NFT metadata updated: MAI Warrior #{}", number);
 
     Ok(())
 }
